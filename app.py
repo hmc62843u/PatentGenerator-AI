@@ -1,10 +1,11 @@
-# app.py
+from transformers import pipeline
+from google import genai
+from google.genai import types
+import os
 import streamlit as st
-import google.generativeai as genai
 import json
-from datetime import datetime, timedelta
 from pathlib import Path
-import tempfile
+from datetime import datetime, timedelta
 import requests
 
 # Load environment variables from Streamlit secrets
@@ -15,7 +16,7 @@ except (KeyError, FileNotFoundError):
     st.stop()
 
 # Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Rate limiting functions
 def init_usage_tracking():
