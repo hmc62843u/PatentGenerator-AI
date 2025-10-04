@@ -1,10 +1,13 @@
-# app.py
+from transformers import pipeline
+from google import genai
+from google.genai import types
+import wave
+import os
 import streamlit as st
-import google.generativeai as genai
-import json
-from datetime import datetime, timedelta
-from pathlib import Path
 import tempfile
+import json
+from pathlib import Path
+from datetime import datetime, timedelta
 import requests
 import urllib.parse
 from bs4 import BeautifulSoup
@@ -18,7 +21,7 @@ except (KeyError, FileNotFoundError):
     st.stop()
 
 # Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Rate limiting functions
 def init_usage_tracking():
@@ -162,8 +165,11 @@ def analyze_website_with_gemini(url, content):
     Be concise but comprehensive. Focus on identifying patentable opportunities.
     """
     
-    model = genai.GenerativeModel('gemini-pro')
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-flash-latest",
+        contents=prompt
+    )
+    
     return response.text
 
 def generate_patent_from_analysis(website_analysis, url):
@@ -186,8 +192,11 @@ def generate_patent_from_analysis(website_analysis, url):
     Focus on solving the core problems identified in the website analysis.
     """
     
-    model = genai.GenerativeModel('gemini-pro')
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-flash-latest",
+        contents=prompt
+    )
+    
     return response.text
 
 def analyze_patent_strength(patent_description):
@@ -208,8 +217,11 @@ def analyze_patent_strength(patent_description):
     Format your response clearly with headings.
     """
     
-    model = genai.GenerativeModel('gemini-pro')
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-flash-latest",
+        contents=prompt
+    )
+    
     return response.text
 
 def generate_patent_claims(patent_description):
@@ -227,8 +239,11 @@ def generate_patent_claims(patent_description):
     Use proper patent claim language and structure.
     """
     
-    model = genai.GenerativeModel('gemini-pro')
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-flash-latest",
+        contents=prompt
+    )
+    
     return response.text
 
 # Form submission handler
