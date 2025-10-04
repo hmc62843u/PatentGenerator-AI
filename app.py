@@ -1,12 +1,14 @@
-from transformers import pipeline
-from google import genai
-from google.genai import types
-import os
+# app.py
 import streamlit as st
+import google.generativeai as genai
 import json
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
+import tempfile
 import requests
+import urllib.parse
+from bs4 import BeautifulSoup
+import re
 
 # Load environment variables from Streamlit secrets
 try:
@@ -16,7 +18,7 @@ except (KeyError, FileNotFoundError):
     st.stop()
 
 # Configure Gemini
-client = genai.Client(api_key=GEMINI_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Rate limiting functions
 def init_usage_tracking():
@@ -92,24 +94,96 @@ def increment_usage(patent_title=""):
     
     return data["usage_count"], data["total_patents_generated"]
 
-# Patent generation functions
-def generate_patent_idea(domain, problem_statement):
-    """Generate a patent idea using Gemini"""
+# Website scraping and analysis functions
+def scrape_website_content(url):
+    """Scrape and extract meaningful content from a website"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        # Extract meaningful content
+        title = soup.find('title')
+        title_text = title.get_text().strip() if title else "No title found"
+        
+        # Get main content - try multiple strategies
+        content_parts = []
+        
+        # Try to get meta description
+        meta_desc = soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            content_parts.append(f"Meta Description: {meta_desc.get('content', '').strip()}")
+        
+        # Get headings
+        for heading in soup.find_all(['h1', 'h2', 'h3']):
+            heading_text = heading.get_text().strip()
+            if heading_text and len(heading_text) > 10:
+                content_parts.append(f"Heading: {heading_text}")
+        
+        # Get paragraph content
+        paragraphs = soup.find_all('p')
+        for p in paragraphs[:10]:  # Limit to first 10 paragraphs
+            text = p.get_text().strip()
+            if len(text) > 50:  # Only include substantial paragraphs
+                content_parts.append(text)
+        
+        # Combine all content
+        full_content = f"Website Title: {title_text}\n\n" + "\n\n".join(content_parts[:15])  # Limit total content
+        
+        return full_content[:4000]  # Limit content length
+    
+    except Exception as e:
+        return f"Error scraping website: {str(e)}"
+
+def analyze_website_with_gemini(url, content):
+    """Use Gemini to analyze the website and extract key information for patent generation"""
     prompt = f"""
-    You are a patent expert and innovation strategist. Create a compelling patent idea based on the following:
+    Analyze this website content and extract key information for generating a patent concept:
     
-    DOMAIN: {domain}
-    PROBLEM STATEMENT: {problem_statement}
+    WEBSITE URL: {url}
+    WEBSITE CONTENT:
+    {content}
     
-    Please generate a comprehensive patent concept including:
-    1. A novel patent title
-    2. Detailed technical description
-    3. Key innovative features
-    4. Potential applications
-    5. Technical implementation approach
+    Please analyze and provide:
+    1. **Technology Domain**: What main technology field does this website represent?
+    2. **Core Problem**: What problem is this website/company trying to solve?
+    3. **Key Innovations**: What innovative approaches or technologies are mentioned?
+    4. **Business Context**: What industry/market does this operate in?
+    5. **Technical Gaps**: What potential technical challenges or limitations might exist?
     
-    Make it realistic, technically sound, and commercially viable.
-    Focus on genuine innovation and avoid generic solutions.
+    Be concise but comprehensive. Focus on identifying patentable opportunities.
+    """
+    
+    model = genai.GenerativeModel('gemini-pro')
+    response = model.generate_content(prompt)
+    return response.text
+
+def generate_patent_from_analysis(website_analysis, url):
+    """Generate a patent concept based on website analysis"""
+    prompt = f"""
+    Based on this website analysis, create a compelling patent concept:
+    
+    WEBSITE ANALYSIS:
+    {website_analysis}
+    
+    Generate a comprehensive patent concept including:
+    1. **Novel Patent Title**: Creative and descriptive
+    2. **Technical Description**: Detailed explanation of the invention
+    3. **Key Innovative Features**: What makes this novel and non-obvious
+    4. **Technical Implementation**: How it would be built/implemented
+    5. **Potential Applications**: Where and how it could be used
+    6. **Competitive Advantages**: Why this is better than existing solutions
+    
+    Make it technically sound, commercially viable, and genuinely innovative.
+    Focus on solving the core problems identified in the website analysis.
     """
     
     model = genai.GenerativeModel('gemini-pro')
@@ -178,10 +252,10 @@ def render_wpatent_promotion():
     st.sidebar.markdown("### 🚀 Powered by W&Patent")
     st.sidebar.markdown("""
     **AI-Powered Patent Solutions:**
-    - Patent Idea Generation
+    - Website-to-Patent Analysis
+    - Competitive Intelligence
+    - Patent Landscape Mapping
     - Strength Analysis
-    - Prior Art Research
-    - Patent Portfolio Management
     - Commercialization Support
     """)
     
@@ -205,9 +279,8 @@ def render_rate_limit_message(current_usage, is_allowed):
         This demo allows **3 patent generations per hour** across all users.
         
         🚀 **For unlimited access and enterprise features:**
-        - **Unlimited patent generation**
-        - **Advanced patent analysis**
-        - **Prior art research**
+        - **Unlimited website analysis**
+        - **Competitive patent intelligence**
         - **Portfolio management**
         - **Commercialization support**
         
@@ -247,9 +320,9 @@ def render_inquiry_form():
                 "I'm interested in: *",
                 [
                     "Select an option",
-                    "Patent Generation Service",
-                    "Strength Analysis",
-                    "Portfolio Management",
+                    "Website-to-Patent Analysis",
+                    "Competitive Intelligence",
+                    "Patent Portfolio Management",
                     "Commercialization Support",
                     "Enterprise Solution",
                     "Other"
@@ -260,19 +333,18 @@ def render_inquiry_form():
                 "Project Type",
                 [
                     "Select a project type",
-                    "Software/App",
-                    "Hardware/Device",
-                    "Biotech/Medical",
-                    "AI/Machine Learning",
-                    "Green Tech",
-                    "Consumer Product",
+                    "Competitor Analysis",
+                    "Technology Landscape",
+                    "Product Innovation",
+                    "Market Expansion",
+                    "Patent Strategy",
                     "Other"
                 ]
             )
         
         message = st.text_area(
             "Message *", 
-            placeholder="Tell us about your patent needs, specific requirements, or any questions you have...",
+            placeholder="Tell us about your patent needs, specific websites you want to analyze, or any questions...",
             height=100
         )
         
@@ -289,7 +361,7 @@ def render_inquiry_form():
                     "interest": interest,
                     "project_type": project_type,
                     "message": message,
-                    "source": "WPatent AI Generator"
+                    "source": "WPatent AI Generator - Website Analysis"
                 }
                 
                 if submit_inquiry_form(form_data):
@@ -297,9 +369,20 @@ def render_inquiry_form():
                 else:
                     st.error("❌ There was an error submitting your form. Please email us directly at wp@wpatent.com")
 
+def validate_url(url):
+    """Validate and format URL"""
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    try:
+        result = urllib.parse.urlparse(url)
+        return all([result.scheme, result.netloc])
+    except:
+        return False
+
 def main():
     st.set_page_config(
-        page_title="W&Patent AI Patent Generator", 
+        page_title="W&Patent AI Website Analyzer", 
         page_icon="⚖️",
         layout="wide"
     )
@@ -310,8 +393,8 @@ def main():
     # Main header with W&Patent branding
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.header("⚖️ W&Patent AI Patent Generator")
-        st.caption("Transform Your Ideas into Patent-Ready Concepts • Powered by AI & Expert Analysis")
+        st.header("🌐 W&Patent AI Website Analyzer")
+        st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence")
     with col2:
         st.markdown("""
         <div style='text-align: right; padding: 10px; background: #f0f2f6; border-radius: 5px;'>
@@ -334,7 +417,7 @@ def main():
         except:
             total_patents = 0
             
-        st.metric("Generations This Hour", f"{current_usage}/3")
+        st.metric("Analyses This Hour", f"{current_usage}/3")
         st.metric("Total Patents Generated", total_patents)
         
         if not is_allowed:
@@ -346,106 +429,109 @@ def main():
         
         # W&Patent promotion
         render_wpatent_promotion()
-    
-    # Main patent generator interface
-    st.markdown("### 🎯 Generate Your Patent Concept")
-    
-    with st.form("patent_generator"):
-        col1, col2 = st.columns(2)
         
-        with col1:
-            domain = st.selectbox(
-                "Technology Domain *",
-                [
-                    "Select a domain",
-                    "Artificial Intelligence & Machine Learning",
-                    "Blockchain & Cryptocurrency",
-                    "Internet of Things (IoT)",
-                    "Biotechnology & Healthcare",
-                    "Renewable Energy & Green Tech",
-                    "Robotics & Automation",
-                    "Quantum Computing",
-                    "Augmented/Virtual Reality",
-                    "Cybersecurity",
-                    "Fintech & Financial Services",
-                    "EdTech & Education",
-                    "AgriTech & Agriculture",
-                    "Space Technology",
-                    "Autonomous Vehicles",
-                    "Other"
-                ]
-            )
-            
-        with col2:
-            complexity = st.select_slider(
-                "Innovation Complexity",
-                options=["Incremental", "Moderate", "Breakthrough"],
-                value="Moderate"
-            )
-        
-        problem_statement = st.text_area(
-            "Problem Statement *",
-            placeholder="Describe the specific problem you want to solve, current limitations, and why existing solutions are inadequate...",
-            height=100
+        # Example websites
+        st.markdown("---")
+        st.markdown("### 🎯 Example Websites to Analyze")
+        st.markdown("""
+        Try these for testing:
+        - `https://www.tesla.com`
+        - `https://www.openai.com`
+        - `https://www.spacex.com`
+        - `https://www.deepmind.com`
+        - `https://www.notion.so`
+        """)
+    
+    # Main website analyzer interface
+    st.markdown("### 🔍 Analyze Website for Patent Opportunities")
+    
+    with st.form("website_analyzer"):
+        website_url = st.text_input(
+            "Website URL *",
+            placeholder="https://example.com or www.competitor-website.com",
+            help="Enter the full URL of the website you want to analyze for patent opportunities"
         )
         
-        additional_context = st.text_area(
-            "Additional Context (Optional)",
-            placeholder="Any specific technical requirements, target market, or special considerations...",
-            height=80
+        analysis_focus = st.selectbox(
+            "Analysis Focus",
+            [
+                "General Technology Analysis",
+                "Competitive Intelligence",
+                "Product Innovation",
+                "Technical Architecture",
+                "Business Model Innovation"
+            ],
+            help="What aspect of the website would you like to focus on for patent generation?"
         )
         
         generate_button = st.form_submit_button(
-            "⚡ Generate Patent Concept", 
+            "🔬 Analyze Website & Generate Patent", 
             type="primary",
             disabled=not is_allowed
         )
     
     if generate_button:
-        if not all([domain != "Select a domain", problem_statement]):
-            st.error("Please fill in all required fields (*)")
+        if not website_url:
+            st.error("Please enter a website URL")
+        elif not validate_url(website_url):
+            st.error("Please enter a valid URL (e.g., https://example.com)")
         else:
             # Check rate limit again before processing
             is_allowed, current_usage = check_rate_limit()
             if not render_rate_limit_message(current_usage, is_allowed):
                 return
             
-            # Generate patent concept
-            with st.spinner("🔬 Analyzing problem space and generating patent concept..."):
-                full_context = f"{problem_statement}"
-                if additional_context:
-                    full_context += f"\n\nAdditional Context: {additional_context}"
+            # Step 1: Scrape website content
+            with st.spinner("🌐 Scraping website content..."):
+                website_content = scrape_website_content(website_url)
                 
-                patent_idea = generate_patent_idea(domain, full_context)
+                if website_content.startswith("Error"):
+                    st.error(f"Failed to scrape website: {website_content}")
+                    return
+                
+                # Show scraped content in expander
+                with st.expander("📄 View Scraped Website Content"):
+                    st.text_area("Extracted Content", website_content, height=200)
             
-            # Analyze patent strength
-            with st.spinner("📊 Analyzing patent strength and commercial potential..."):
+            # Step 2: Analyze website with Gemini
+            with st.spinner("🤖 Analyzing website content and identifying opportunities..."):
+                website_analysis = analyze_website_with_gemini(website_url, website_content)
+                
+                with st.expander("📊 View Website Analysis"):
+                    st.markdown(website_analysis)
+            
+            # Step 3: Generate patent concept
+            with st.spinner("💡 Generating patent concept based on analysis..."):
+                patent_idea = generate_patent_from_analysis(website_analysis, website_url)
+            
+            # Step 4: Analyze patent strength
+            with st.spinner("📈 Analyzing patent strength and commercial potential..."):
                 strength_analysis = analyze_patent_strength(patent_idea)
             
-            # Generate patent claims
+            # Step 5: Generate patent claims
             with st.spinner("⚖️ Drafting formal patent claims..."):
                 patent_claims = generate_patent_claims(patent_idea)
             
             # Extract patent title for tracking
-            patent_title = "Generated Patent Concept"
-            if "**Title:**" in patent_idea:
-                patent_title = patent_idea.split("**Title:**")[1].split("\n")[0].strip()
-            elif "Patent Title:" in patent_idea:
-                patent_title = patent_idea.split("Patent Title:")[1].split("\n")[0].strip()
+            patent_title = f"Patent from {website_url}"
+            if "**Patent Title:**" in patent_idea:
+                patent_title = patent_idea.split("**Patent Title:**")[1].split("\n")[0].strip()
+            elif "Title:" in patent_idea:
+                patent_title = patent_idea.split("Title:")[1].split("\n")[0].strip()
             
             # Increment usage counter after successful generation
             new_usage_count, total_patents = increment_usage(patent_title)
             
             # Update sidebar metrics
-            st.sidebar.metric("Generations This Hour", f"{new_usage_count}/3")
+            st.sidebar.metric("Analyses This Hour", f"{new_usage_count}/3")
             st.sidebar.metric("Total Patents Generated", total_patents)
             
             # Display results
-            st.success("🎉 Patent concept generated successfully!")
-            st.info("💡 **Ready to protect your innovation?** Contact wp@wpatent.com for full patent services!")
+            st.success("🎉 Patent concept generated successfully from website analysis!")
+            st.info("💡 **Ready to protect these innovations?** Contact wp@wpatent.com for full patent services!")
             
             # Results in tabs
-            tab1, tab2, tab3 = st.tabs(["📄 Patent Concept", "📊 Strength Analysis", "⚖️ Patent Claims"])
+            tab1, tab2, tab3, tab4 = st.tabs(["💡 Patent Concept", "📊 Strength Analysis", "⚖️ Patent Claims", "🌐 Website Insights"])
             
             with tab1:
                 st.subheader("Generated Patent Concept")
@@ -455,7 +541,7 @@ def main():
                 st.download_button(
                     label="📥 Download Patent Concept",
                     data=patent_idea,
-                    file_name=f"wpatent_concept_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                    file_name=f"wpatent_from_{website_url.replace('https://', '').replace('/', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                     mime="text/plain"
                 )
             
@@ -467,35 +553,66 @@ def main():
                 st.subheader("Formal Patent Claims")
                 st.markdown(patent_claims)
             
-            # Success metrics and next steps
-            st.markdown("---")
-            st.markdown("### 🚀 Next Steps for Your Patent")
+            with tab4:
+                st.subheader("Original Website Analysis")
+                st.markdown(website_analysis)
             
-            col1, col2, col3 = st.columns(3)
+            # Competitive intelligence insights
+            st.markdown("---")
+            st.markdown("### 🎯 Competitive Intelligence Insights")
+            
+            col1, col2 = st.columns(2)
             
             with col1:
                 st.markdown("""
-                **🔍 Prior Art Search**
-                - Comprehensive patent database search
-                - Identify potential conflicts
-                - Validate novelty
+                **🔍 What We Discovered:**
+                - Technology trends from the website
+                - Potential innovation gaps
+                - Competitive positioning
+                - Market opportunities
                 """)
             
             with col2:
                 st.markdown("""
-                **📝 Patent Drafting**
-                - Professional patent attorneys
-                - Formal specification
-                - Claims optimization
+                **🚀 Next Steps:**
+                - Deep dive competitive analysis
+                - Patent landscape mapping
+                - Innovation strategy development
+                - Portfolio optimization
                 """)
-            
-            with col3:
-                st.markdown("""
-                **🎯 Commercialization**
-                - Market analysis
-                - Licensing opportunities
-                - Investment readiness
-                """)
+    
+    # Example analysis section
+    st.markdown("---")
+    st.markdown("### 💡 How It Works")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("""
+        **🌐 Website Input**
+        1. Enter any website URL
+        2. AI scrapes and analyzes content
+        3. Identifies key technologies
+        4. Extracts business context
+        """)
+    
+    with col2:
+        st.markdown("""
+        **🤖 AI Analysis**
+        1. Technology domain mapping
+        2. Problem identification
+        3. Innovation opportunity spotting
+        4. Competitive gap analysis
+        """)
+    
+    with col3:
+        st.markdown("""
+        **⚖️ Patent Output**
+        1. Novel patent concepts
+        2. Strength assessment
+        3. Formal claims drafting
+        4. Commercial potential
+        """)
     
     # Always show the inquiry form
     render_inquiry_form()
@@ -504,7 +621,7 @@ def main():
     st.markdown("---")
     st.markdown("""
     <div style='text-align: center; color: #666; padding: 20px;'>
-        <strong>W&Patent AI Patent Generator</strong> • The World's Smarter Patent Marketplace • 
+        <strong>W&Patent AI Website Analyzer</strong> • The World's Smarter Patent Marketplace • 
         <a href="mailto:wp@wpatent.com" style='color: #007bff;'>wp@wpatent.com</a> • 
         <a href="https://www.wpatent.com" style='color: #007bff;'>www.wpatent.com</a>
     </div>
