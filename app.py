@@ -12,6 +12,7 @@ import requests
 import urllib.parse
 from bs4 import BeautifulSoup
 import re
+from duckduckgo_search import DDGS
 
 # Load environment variables from Streamlit secrets
 try:
@@ -96,6 +97,169 @@ def increment_usage(patent_title=""):
         json.dump(data, f)
     
     return data["usage_count"], data["total_patents_generated"]
+
+def search_prior_art(patent_claims, max_results=5):
+    """Search for prior art using DuckDuckGo based on patent claims"""
+    try:
+        # Extract key terms from patent claims for search
+        search_terms = extract_search_terms_from_claims(patent_claims)
+        
+        with DDGS() as ddgs:
+            results = []
+            for term in search_terms[:3]:  # Use top 3 search terms
+                query = f"patent {term} technology prior art"
+                search_results = list(ddgs.text(query, max_results=max_results))
+
+                for r in search_results:
+                    url = r.get("href")
+                    title = r.get("title")
+                    content = r.get("body")
+
+                    if not all([url, title, content]):
+                        continue
+
+                    # Add result to list WITH SOURCE INFORMATION
+                    result = {
+                        "title": title,
+                        "url": url,
+                        "content": content,
+                        "search_term": term,
+                        "source": "DuckDuckGo Search",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    results.append(result)
+
+            return {"results": results, "search_terms": search_terms}
+    except Exception as e:
+        return {"error": f"Prior art search failed: {str(e)}", "results": []}
+
+def extract_search_terms_from_claims(patent_claims):
+    """Extract key search terms from patent claims for prior art research"""
+    # Simple extraction of key terms - you could enhance this with NLP
+    claims_text = patent_claims.lower()
+    
+    # Remove common patent claim language
+    stop_words = ['claim', 'comprising', 'wherein', 'method', 'system', 'device', 'apparatus']
+    for word in stop_words:
+        claims_text = claims_text.replace(word, '')
+    
+    # Extract potential technical terms (words with capital letters or technical sounding)
+    words = re.findall(r'\b[a-zA-Z]{4,}\b', claims_text)
+    
+    # Filter for potentially technical terms (longer words often more specific)
+    technical_terms = [word for word in words if len(word) > 5][:10]
+    
+    return list(set(technical_terms))  # Remove duplicates
+
+def analyze_prior_art_with_gemini(patent_claims, prior_art_results):
+    """Use Gemini to analyze prior art search results WITH SOURCE CITATIONS"""
+    if not prior_art_results.get('results'):
+        return "No prior art results to analyze."
+    
+    # Format results with clear source citations
+    search_results_text = "\n\n".join([
+        f"[SOURCE {i+1}]\n"
+        f"Title: {result['title']}\n"
+        f"URL: {result['url']}\n"
+        f"Relevance: {result['content'][:300]}...\n"
+        f"Search Term: {result['search_term']}\n"
+        for i, result in enumerate(prior_art_results['results'])
+    ])
+    
+    prompt = f"""
+    Analyze these prior art search results in relation to the patent claims below.
+    For each assessment point, REFERENCE THE SPECIFIC SOURCE(S) that support your analysis.
+    
+    PATENT CLAIMS:
+    {patent_claims}
+    
+    PRIOR ART SEARCH RESULTS:
+    {search_results_text}
+    
+    Please provide a thorough analysis with SOURCE REFERENCES:
+    
+    1. **NOVELTY ASSESSMENT** 
+       - Overall novelty score (1-10)
+       - Specific elements that appear novel vs. existing art
+       - Reference specific sources that support this assessment
+    
+    2. **SIMILAR TECHNOLOGIES FOUND**
+       - List similar technologies/patents found, citing sources
+       - Describe how they relate to the claims
+    
+    3. **POTENTIAL CONFLICTS & OVERLAPS**
+       - Identify potential infringement risks with source evidence
+       - Highlight overlapping technical approaches
+    
+    4. **RECOMMENDATIONS FOR CLAIM MODIFICATION**
+       - Suggest specific claim language changes to improve novelty
+       - Reference the prior art that necessitates these changes
+    
+    5. **SEARCH QUALITY ASSESSMENT**
+       - Evaluate comprehensiveness of search
+       - Suggest additional search terms
+    
+    Always cite sources using format: [SOURCE X] when referencing specific findings.
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt
+        )
+        return response.text
+    except Exception as e:
+        return f"Error analyzing prior art: {str(e)}"
+
+def display_prior_art_results(prior_art_results, prior_art_analysis, patent_claims):
+    """Display prior art results with proper source attribution"""
+    st.subheader("🔍 Prior Art Research Analysis")
+    
+    if prior_art_results.get('error'):
+        st.error(f"Prior art search failed: {prior_art_results['error']}")
+        return
+    
+    # Show search terms used
+    if prior_art_results.get('search_terms'):
+        st.markdown(f"**🔎 Search Terms Used:** `{', '.join(prior_art_results['search_terms'])}`")
+    
+    # 1. Show the AI analysis with citations
+    st.markdown("### 📊 Prior Art Assessment")
+    st.markdown(prior_art_analysis)
+    
+    # 2. Show detailed source references
+    st.markdown("### 📚 Source References")
+    
+    for i, result in enumerate(prior_art_results.get('results', [])[:5]):
+        with st.expander(f"📄 Source {i+1}: {result['title']}"):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**Title:** {result['title']}")
+                st.markdown(f"**URL:** {result['url']}")
+                st.markdown(f"**Search Term:** `{result.get('search_term', 'N/A')}`")
+                st.markdown(f"**Content Preview:** {result['content'][:500]}...")
+            
+            with col2:
+                # Add a button to visit the source
+                st.markdown(f"[🌐 Visit Source]({result['url']})")
+                st.markdown(f"**Reference:** [SOURCE {i+1}]")
+    
+    # 3. Add download capability for sources
+    sources_data = {
+        "patent_claims": patent_claims,
+        "search_terms": prior_art_results.get('search_terms', []),
+        "sources": prior_art_results.get('results', []),
+        "analysis": prior_art_analysis,
+        "generated_at": datetime.now().isoformat()
+    }
+    
+    st.download_button(
+        label="📥 Download Prior Art Report",
+        data=json.dumps(sources_data, indent=2),
+        file_name=f"prior_art_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json"
+    )
 
 # Website scraping and analysis functions
 def scrape_website_content(url):
@@ -409,7 +573,7 @@ def main():
     col1, col2 = st.columns([4, 1])
     with col1:
         st.header("🌐 W&Patent AI Website Analyzer")
-        st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence")
+        st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence • Prior Art Research")
     with col2:
         st.markdown("""
         <div style='text-align: right; padding: 10px; background: #f0f2f6; border-radius: 5px;'>
@@ -479,6 +643,12 @@ def main():
             help="What aspect of the website would you like to focus on for patent generation?"
         )
         
+        include_prior_art = st.checkbox(
+            "🔍 Include Prior Art Research", 
+            value=True,
+            help="Search for existing similar patents/technologies using DuckDuckGo"
+        )
+        
         generate_button = st.form_submit_button(
             "🔬 Analyze Website & Generate Patent", 
             type="primary",
@@ -527,6 +697,17 @@ def main():
             with st.spinner("⚖️ Drafting formal patent claims..."):
                 patent_claims = generate_patent_claims(patent_idea)
             
+            # Step 6: Prior Art Research (if enabled)
+            prior_art_results = None
+            prior_art_analysis = None
+            
+            if include_prior_art:
+                with st.spinner("🔍 Searching for prior art and similar technologies..."):
+                    prior_art_results = search_prior_art(patent_claims, max_results=5)
+                    
+                    if not prior_art_results.get('error'):
+                        prior_art_analysis = analyze_prior_art_with_gemini(patent_claims, prior_art_results)
+            
             # Extract patent title for tracking
             patent_title = f"Patent from {website_url}"
             if "**Patent Title:**" in patent_idea:
@@ -545,10 +726,14 @@ def main():
             st.success("🎉 Patent concept generated successfully from website analysis!")
             st.info("💡 **Ready to protect these innovations?** Contact wp@wpatent.com for full patent services!")
             
-            # Results in tabs
-            tab1, tab2, tab3, tab4 = st.tabs(["💡 Patent Concept", "📊 Strength Analysis", "⚖️ Patent Claims", "🌐 Website Insights"])
+            # Results in tabs - UPDATED TO INCLUDE PRIOR ART TAB
+            tab_names = ["💡 Patent Concept", "📊 Strength Analysis", "⚖️ Patent Claims", "🌐 Website Insights"]
+            if include_prior_art and prior_art_results:
+                tab_names.append("🔍 Prior Art Research")
             
-            with tab1:
+            tabs = st.tabs(tab_names)
+            
+            with tabs[0]:
                 st.subheader("Generated Patent Concept")
                 st.markdown(patent_idea)
                 
@@ -560,18 +745,24 @@ def main():
                     mime="text/plain"
                 )
             
-            with tab2:
+            with tabs[1]:
                 st.subheader("Patent Strength Analysis")
                 st.markdown(strength_analysis)
             
-            with tab3:
+            with tabs[2]:
                 st.subheader("Formal Patent Claims")
                 st.markdown(patent_claims)
             
-            with tab4:
+            with tabs[3]:
                 st.subheader("Original Website Analysis")
                 st.markdown(website_analysis)
             
+            # Prior Art Research Tab
+            if include_prior_art and prior_art_results and len(tabs) > 4:
+                with tabs[4]:
+                    # Call the proper display function with all required parameters
+                    display_prior_art_results(prior_art_results, prior_art_analysis, patent_claims)
+                    
             # Competitive intelligence insights
             st.markdown("---")
             st.markdown("### 🎯 Competitive Intelligence Insights")
