@@ -12,7 +12,7 @@ import requests
 import urllib.parse
 from bs4 import BeautifulSoup
 import re
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # Load environment variables from Streamlit secrets
 try:
@@ -762,7 +762,7 @@ def main():
                 with tabs[4]:
                     # Call the proper display function with all required parameters
                     display_prior_art_results(prior_art_results, prior_art_analysis, patent_claims)
-                    
+
             # Competitive intelligence insights
             st.markdown("---")
             st.markdown("### 🎯 Competitive Intelligence Insights")
