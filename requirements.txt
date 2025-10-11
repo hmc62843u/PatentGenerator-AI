@@ -8,6 +8,7 @@ cachetools==5.5.2
 certifi==2025.8.3
 charset-normalizer==3.4.3
 click==8.3.0
+ddgs==9.6.0
 dotenv==0.9.9
 filelock==3.19.1
 fsspec==2025.9.0
