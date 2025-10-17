@@ -470,7 +470,7 @@ def generate_competitor_search_query(patent_claims, website_analysis):
     """
     
     try:
-        response = groq_generate_content(prompt, max_tokens=512)
+        response = groq_generate_content(prompt)
         
         # Parse JSON response
         json_match = re.search(r'\{.*\}', response, re.DOTALL)
