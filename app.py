@@ -1,3 +1,5 @@
+[file name]: app.py
+[file content begin]
 from transformers import pipeline
 from google import genai
 from google.genai import types
@@ -97,6 +99,261 @@ def increment_usage(patent_title=""):
         json.dump(data, f)
     
     return data["usage_count"], data["total_patents_generated"]
+
+# NEW: Infringement Analysis Functions
+def find_industry_competitors(industry_keywords, max_competitors=8):
+    """Find competitor websites in the same industry"""
+    try:
+        with DDGS() as ddgs:
+            competitors = []
+            query = f"top companies in {industry_keywords} industry website"
+            search_results = list(ddgs.text(query, max_results=max_competitors))
+            
+            for result in search_results:
+                url = result.get("href", "")
+                if url and any(domain in url for domain in ['.com', '.org', '.io', '.net']):
+                    competitors.append({
+                        "name": result.get("title", "Unknown Company"),
+                        "url": url,
+                        "description": result.get("body", "")[:200] + "..."
+                    })
+            
+            return competitors
+    except Exception as e:
+        st.error(f"Error finding competitors: {str(e)}")
+        return []
+
+def extract_industry_keywords(website_analysis, patent_claims):
+    """Extract industry keywords from website analysis and patent claims"""
+    # Combine both sources for better industry detection
+    combined_text = f"{website_analysis} {patent_claims}".lower()
+    
+    # Common industry terms to look for
+    industry_terms = [
+        'software', 'technology', 'healthcare', 'medical', 'finance', 'financial', 
+        'ecommerce', 'retail', 'manufacturing', 'automotive', 'education', 
+        'energy', 'renewable', 'biotech', 'pharmaceutical', 'telecom', 
+        'entertainment', 'gaming', 'logistics', 'transportation', 'real estate',
+        'agriculture', 'food tech', 'insurtech', 'fintech', 'edtech', 'healthtech'
+    ]
+    
+    found_industries = []
+    for term in industry_terms:
+        if term in combined_text:
+            found_industries.append(term)
+    
+    # If no specific industries found, use broader terms from the analysis
+    if not found_industries:
+        # Extract potential industry from website analysis
+        if "technology" in combined_text:
+            found_industries.append("technology")
+        if "software" in combined_text:
+            found_industries.append("software")
+        if "platform" in combined_text:
+            found_industries.append("technology platform")
+    
+    return found_industries[:3]  # Return top 3 industry keywords
+
+def infringement_risk_analysis(patent_claims, competitor_url):
+    """Analyze a specific competitor website for infringement risks"""
+    try:
+        # Scrape the competitor site
+        site_content = scrape_website_content(competitor_url)
+        
+        if site_content.startswith("Error"):
+            return {
+                "competitor_url": competitor_url,
+                "risk_level": "Unknown",
+                "error": site_content,
+                "overlapping_features": [],
+                "recommendations": []
+            }
+        
+        # Analyze for infringement risks using Gemini
+        analysis_prompt = f"""
+        PATENT CLAIMS TO ANALYZE:
+        {patent_claims}
+        
+        COMPETITOR WEBSITE CONTENT:
+        {site_content}
+        
+        Analyze for potential patent infringement risks. Focus on:
+        
+        1. **DIRECT PRODUCT MATCH**: Does the website show products/services that directly implement the claimed invention?
+        2. **FEATURE OVERLAP**: Which specific claim elements appear to be implemented in their products?
+        3. **TECHNICAL SIMILARITY**: How similar are the technical approaches and implementations?
+        4. **COMMERCIAL USE EVIDENCE**: Is there evidence of actual commercial use of similar technology?
+        
+        Provide your analysis in this exact JSON format:
+        {{
+            "risk_level": "Low/Medium/High",
+            "overlapping_features": ["list of specific overlapping features"],
+            "infringement_confidence": "Low/Medium/High",
+            "key_findings": "Detailed analysis of potential infringement",
+            "recommendations": ["list of recommendations for further action"]
+        }}
+        
+        Be thorough and evidence-based in your assessment.
+        """
+        
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=analysis_prompt
+        )
+        
+        # Parse the JSON response
+        try:
+            analysis_result = json.loads(response.text)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a structured response from text
+            analysis_result = {
+                "risk_level": "Medium",
+                "overlapping_features": ["Unable to parse detailed features"],
+                "infringement_confidence": "Medium", 
+                "key_findings": response.text[:500] + "...",
+                "recommendations": ["Conduct manual review of this competitor"]
+            }
+        
+        # Add competitor info to result
+        analysis_result["competitor_url"] = competitor_url
+        analysis_result["scraped_content_preview"] = site_content[:300] + "..."
+        
+        return analysis_result
+        
+    except Exception as e:
+        return {
+            "competitor_url": competitor_url,
+            "risk_level": "Error",
+            "error": str(e),
+            "overlapping_features": [],
+            "recommendations": ["Analysis failed - manual review required"]
+        }
+
+def industry_wide_infringement_scan(patent_claims, industry_keywords, max_competitors=5):
+    """Search across multiple industry players for infringement risks"""
+    st.info(f"🔍 Scanning industry: {', '.join(industry_keywords)}")
+    
+    # Find competitors in this industry
+    competitors = find_industry_competitors(industry_keywords[0] if industry_keywords else "technology", 
+                                          max_competitors)
+    
+    if not competitors:
+        return {
+            "error": "No competitors found for analysis",
+            "scanned_competitors": 0,
+            "high_risk_findings": 0,
+            "detailed_results": []
+        }
+    
+    infringement_findings = []
+    high_risk_count = 0
+    
+    # Analyze each competitor
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, competitor in enumerate(competitors):
+        status_text.text(f"Analyzing {competitor['name']}... ({i+1}/{len(competitors)})")
+        
+        risk_analysis = infringement_risk_analysis(patent_claims, competitor["url"])
+        infringement_findings.append({
+            "competitor_info": competitor,
+            "risk_analysis": risk_analysis
+        })
+        
+        if risk_analysis.get("risk_level") == "High":
+            high_risk_count += 1
+        
+        progress_bar.progress((i + 1) / len(competitors))
+    
+    status_text.text("Analysis complete!")
+    
+    return {
+        "scanned_competitors": len(competitors),
+        "high_risk_findings": high_risk_count,
+        "industry_keywords": industry_keywords,
+        "detailed_results": infringement_findings,
+        "overall_risk_level": "High" if high_risk_count > 0 else "Medium" if len(competitors) > 0 else "Low"
+    }
+
+def display_infringement_results(infringement_results, patent_claims):
+    """Display infringement analysis results in Streamlit"""
+    st.subheader("⚖️ Infringement Risk Analysis")
+    
+    if infringement_results.get('error'):
+        st.error(f"Infringement analysis failed: {infringement_results['error']}")
+        return
+    
+    # Summary metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Competitors Scanned", infringement_results['scanned_competitors'])
+    with col2:
+        st.metric("High Risk Findings", infringement_results['high_risk_findings'])
+    with col3:
+        st.metric("Overall Risk", infringement_results['overall_risk_level'])
+    
+    # Detailed results
+    st.markdown("### 📊 Detailed Competitor Analysis")
+    
+    for i, result in enumerate(infringement_results['detailed_results']):
+        competitor = result['competitor_info']
+        analysis = result['risk_analysis']
+        
+        # Color code based on risk level
+        risk_color = {
+            "High": "red",
+            "Medium": "orange", 
+            "Low": "green",
+            "Error": "gray"
+        }.get(analysis.get('risk_level', 'Unknown'), 'gray')
+        
+        with st.expander(f"🎯 {competitor['name']} - Risk: :{risk_color}[{analysis.get('risk_level', 'Unknown')}]", expanded=i < 2):
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"**Website:** {competitor['url']}")
+                st.markdown(f"**Description:** {competitor.get('description', 'N/A')}")
+                
+                if analysis.get('key_findings'):
+                    st.markdown("**Key Findings:**")
+                    st.info(analysis['key_findings'])
+                
+                if analysis.get('overlapping_features'):
+                    st.markdown("**Overlapping Features:**")
+                    for feature in analysis['overlapping_features']:
+                        st.write(f"• {feature}")
+            
+            with col2:
+                st.markdown(f"**Confidence:** {analysis.get('infringement_confidence', 'N/A')}")
+                
+                if analysis.get('recommendations'):
+                    st.markdown("**Recommendations:**")
+                    for rec in analysis['recommendations'][:2]:  # Show top 2
+                        st.write(f"📌 {rec}")
+            
+            # Visit competitor button
+            st.markdown(f"[🌐 Visit Competitor Website]({competitor['url']})")
+    
+    # Download report
+    infringement_report = {
+        "patent_claims": patent_claims,
+        "analysis_summary": {
+            "scanned_competitors": infringement_results['scanned_competitors'],
+            "high_risk_findings": infringement_results['high_risk_findings'],
+            "overall_risk_level": infringement_results['overall_risk_level'],
+            "industry_keywords": infringement_results.get('industry_keywords', [])
+        },
+        "detailed_results": infringement_results['detailed_results'],
+        "generated_at": datetime.now().isoformat()
+    }
+    
+    st.download_button(
+        label="📥 Download Infringement Analysis Report",
+        data=json.dumps(infringement_report, indent=2),
+        file_name=f"infringement_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+        mime="application/json"
+    )
 
 def search_prior_art(patent_claims, max_results=5):
     """Search for prior art using DuckDuckGo based on patent claims"""
@@ -436,6 +693,7 @@ def render_wpatent_promotion():
     - Patent Landscape Mapping
     - Strength Analysis
     - Commercialization Support
+    - **NEW: Infringement Risk Analysis**
     """)
     
     st.sidebar.markdown("---")
@@ -462,6 +720,7 @@ def render_rate_limit_message(current_usage, is_allowed):
         - **Competitive patent intelligence**
         - **Portfolio management**
         - **Commercialization support**
+        - **Infringement risk analysis**
         
         📧 **Contact:** wp@wpatent.com
         """)
@@ -503,6 +762,7 @@ def render_inquiry_form():
                     "Competitive Intelligence",
                     "Patent Portfolio Management",
                     "Commercialization Support",
+                    "Infringement Risk Analysis",
                     "Enterprise Solution",
                     "Other"
                 ]
@@ -517,6 +777,7 @@ def render_inquiry_form():
                     "Product Innovation",
                     "Market Expansion",
                     "Patent Strategy",
+                    "Infringement Assessment",
                     "Other"
                 ]
             )
@@ -573,7 +834,7 @@ def main():
     col1, col2 = st.columns([4, 1])
     with col1:
         st.header("🌐 W&Patent AI Website Analyzer")
-        st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence • Prior Art Research")
+        st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence • Prior Art Research • Infringement Risk Analysis")
     with col2:
         st.markdown("""
         <div style='text-align: right; padding: 10px; background: #f0f2f6; border-radius: 5px;'>
@@ -649,6 +910,12 @@ def main():
             help="Search for existing similar patents/technologies using DuckDuckGo"
         )
         
+        include_infringement_analysis = st.checkbox(
+            "⚖️ Include Infringement Risk Analysis", 
+            value=True,
+            help="NEW: Scan competitor websites for potential infringement risks"
+        )
+        
         generate_button = st.form_submit_button(
             "🔬 Analyze Website & Generate Patent", 
             type="primary",
@@ -708,6 +975,20 @@ def main():
                     if not prior_art_results.get('error'):
                         prior_art_analysis = analyze_prior_art_with_gemini(patent_claims, prior_art_results)
             
+            # NEW: Step 7 - Infringement Risk Analysis (if enabled)
+            infringement_results = None
+            
+            if include_infringement_analysis:
+                with st.spinner("⚖️ Analyzing infringement risks across industry competitors..."):
+                    # Extract industry keywords for competitor search
+                    industry_keywords = extract_industry_keywords(website_analysis, patent_claims)
+                    
+                    infringement_results = industry_wide_infringement_scan(
+                        patent_claims, 
+                        industry_keywords,
+                        max_competitors=5
+                    )
+            
             # Extract patent title for tracking
             patent_title = f"Patent from {website_url}"
             if "**Patent Title:**" in patent_idea:
@@ -726,10 +1007,12 @@ def main():
             st.success("🎉 Patent concept generated successfully from website analysis!")
             st.info("💡 **Ready to protect these innovations?** Contact wp@wpatent.com for full patent services!")
             
-            # Results in tabs - UPDATED TO INCLUDE PRIOR ART TAB
+            # Results in tabs - UPDATED TO INCLUDE INFRINGEMENT ANALYSIS TAB
             tab_names = ["💡 Patent Concept", "📊 Strength Analysis", "⚖️ Patent Claims", "🌐 Website Insights"]
             if include_prior_art and prior_art_results:
                 tab_names.append("🔍 Prior Art Research")
+            if include_infringement_analysis and infringement_results:
+                tab_names.append("⚖️ Infringement Risks")
             
             tabs = st.tabs(tab_names)
             
@@ -759,9 +1042,20 @@ def main():
             
             # Prior Art Research Tab
             if include_prior_art and prior_art_results and len(tabs) > 4:
-                with tabs[4]:
-                    # Call the proper display function with all required parameters
+                tab_index = 4
+                if include_infringement_analysis and infringement_results:
+                    tab_index = 4  # Prior art comes before infringement
+                    infringement_tab_index = 5
+                else:
+                    infringement_tab_index = None
+                
+                with tabs[tab_index]:
                     display_prior_art_results(prior_art_results, prior_art_analysis, patent_claims)
+            
+            # Infringement Analysis Tab
+            if include_infringement_analysis and infringement_results and infringement_tab_index and len(tabs) > infringement_tab_index:
+                with tabs[infringement_tab_index]:
+                    display_infringement_results(infringement_results, patent_claims)
 
             # Competitive intelligence insights
             st.markdown("---")
@@ -776,6 +1070,7 @@ def main():
                 - Potential innovation gaps
                 - Competitive positioning
                 - Market opportunities
+                - Infringement risk assessment
                 """)
             
             with col2:
@@ -785,13 +1080,14 @@ def main():
                 - Patent landscape mapping
                 - Innovation strategy development
                 - Portfolio optimization
+                - Freedom-to-operate analysis
                 """)
     
     # Example analysis section
     st.markdown("---")
     st.markdown("### 💡 How It Works")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown("""
@@ -819,6 +1115,15 @@ def main():
         3. Formal claims drafting
         4. Commercial potential
         """)
+        
+    with col4:
+        st.markdown("""
+        **🛡️ Risk Analysis**
+        1. Competitor scanning
+        2. Infringement risk assessment
+        3. Industry landscape
+        4. Risk mitigation
+        """)
     
     # Always show the inquiry form
     render_inquiry_form()
@@ -835,3 +1140,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+[file content end]
