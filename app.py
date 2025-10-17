@@ -440,8 +440,111 @@ def infringement_risk_analysis(patent_claims, competitor_url):
             "recommendations": ["Analysis failed - manual review required"]
         }
 
+def generate_competitor_search_query(patent_claims, website_analysis):
+    """Use Groq to generate specific competitor search queries based on the actual technology"""
+    
+    prompt = f"""
+    Based on this patent context and website analysis, generate 3 specific search queries to find competitor companies that might be working on similar technology.
+    
+    PATENT CONTEXT:
+    {patent_claims[:1500]}
+    
+    WEBSITE ANALYSIS:
+    {website_analysis[:1500]}
+    
+    Generate 3 search queries that are:
+    1. **Specific to the technology** (not just generic industry terms)
+    2. **Include company/product names** if mentioned
+    3. **Focus on commercial competitors** (not academic/research)
+    4. **Use natural language** that would work in search engines
+    
+    Return in this exact JSON format:
+    {{
+        "search_queries": [
+            "query 1",
+            "query 2", 
+            "query 3"
+        ],
+        "reasoning": "Why these queries are likely to find relevant competitors"
+    }}
+    """
+    
+    try:
+        response = groq_generate_content(prompt, max_tokens=512)
+        
+        # Parse JSON response
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            return result
+        else:
+            # Fallback queries
+            return {
+                "search_queries": [
+                    f"companies similar to {website_analysis.split()[0]} technology",
+                    f"{patent_claims.split()[0]} {patent_claims.split()[1]} competitors",
+                    "technology companies in this industry"
+                ],
+                "reasoning": "Fallback queries generated"
+            }
+    except Exception as e:
+        st.warning(f"Failed to generate smart search queries: {str(e)}")
+        return {
+            "search_queries": ["technology companies competitors"],
+            "reasoning": "Error fallback"
+        }
+
+def find_relevant_competitors(patent_claims, website_analysis, max_competitors=8):
+    """Find competitor websites using AI-generated search queries"""
+    try:
+        # Generate smart search queries
+        search_plan = generate_competitor_search_query(patent_claims, website_analysis)
+        
+        st.info(f"🔍 Using smart search: {search_plan.get('reasoning', 'Finding relevant competitors')}")
+        
+        competitors = []
+        seen_urls = set()
+        
+        with DDGS() as ddgs:
+            # Try each search query
+            for query in search_plan.get("search_queries", [])[:2]:  # Use top 2 queries
+                if len(competitors) >= max_competitors:
+                    break
+                    
+                st.write(f"  - Searching: '{query}'")
+                search_results = list(ddgs.text(query, max_results=max_competitors))
+                
+                for result in search_results:
+                    if len(competitors) >= max_competitors:
+                        break
+                        
+                    url = result.get("href", "")
+                    title = result.get("title", "")
+                    
+                    # Filter out non-company websites
+                    if (url and 
+                        any(domain in url for domain in ['.com', '.io', '.co', '.tech', '.ai']) and
+                        url not in seen_urls and
+                        not any(exclude in url for exclude in ['wikipedia', 'academic', 'research', 'github']) and
+                        not any(exclude in title.lower() for exclude in ['wikipedia', 'academic paper', 'research paper'])):
+                        
+                        competitors.append({
+                            "name": title if title else "Unknown Company",
+                            "url": url,
+                            "description": result.get("body", "")[:200] + "...",
+                            "search_query": query
+                        })
+                        seen_urls.add(url)
+        
+        return competitors
+        
+    except Exception as e:
+        st.error(f"Error finding competitors: {str(e)}")
+        return []
+
+# ENHANCED industry_wide_infringement_scan function
 def industry_wide_infringement_scan(patent_claims, website_analysis, original_url, max_competitors=5):
-    """Search across multiple industry players for infringement risks"""
+    """Search across multiple industry players for infringement risks using AI-generated search"""
     
     # Use robust industry detection
     detected_industries = robust_industry_detection(patent_claims, website_analysis, original_url)
@@ -458,14 +561,19 @@ def industry_wide_infringement_scan(patent_claims, website_analysis, original_ur
     # Show detected industries
     st.success(f"🎯 Detected Industries: {', '.join(detected_industries.keys())}")
     
-    # Use the highest confidence industry for competitor search
+    # Use the highest confidence industry as context
     primary_industry = next(iter(detected_industries))
     industry_confidence = detected_industries[primary_industry]
     
     st.info(f"🔍 Scanning {primary_industry} industry (confidence: {industry_confidence}%)...")
     
-    # Find competitors in this industry
-    competitors = find_industry_competitors(primary_industry, max_competitors)
+    # Find competitors using AI-generated search queries
+    competitors = find_relevant_competitors(patent_claims, website_analysis, max_competitors)
+    
+    if not competitors:
+        st.warning("No relevant competitors found with AI search. Falling back to generic search...")
+        # Fallback to original method
+        competitors = find_industry_competitors(primary_industry, max_competitors)
     
     if not competitors:
         return {
@@ -504,6 +612,7 @@ def industry_wide_infringement_scan(patent_claims, website_analysis, original_ur
         "detected_industries": detected_industries,
         "primary_industry": primary_industry,
         "detailed_results": infringement_findings,
+        "search_method": "AI-Generated Queries",
         "overall_risk_level": "High" if high_risk_count > 0 else "Medium" if len(competitors) > 0 else "Low"
     }
 
@@ -1079,13 +1188,6 @@ def main():
             st.warning("⚠️ Approaching Limit")
         else:
             st.success("✅ Within Limit")
-        
-        # Groq model info
-        st.markdown("---")
-        st.markdown("### 🤖 AI Model")
-        st.markdown(f"**Using:** {GROQ_MODEL}")
-        st.markdown("**Provider:** Groq")
-        st.markdown("**Speed:** ⚡ Ultra-fast")
         
         # W&Patent promotion
         render_wpatent_promotion()
