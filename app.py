@@ -27,7 +27,7 @@ except (KeyError, FileNotFoundError):
 client = groq.Client(api_key=GROQ_API_KEY)
 
 # Groq model configuration
-GROQ_MODEL = "meta-llama/llama-guard-4-12b"  # Options: "llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"
+GROQ_MODEL = "qwen/qwen3-32b"  # Options: "llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"
 
 def groq_generate_content(prompt, model=GROQ_MODEL):
     """Generate content using Groq API"""
