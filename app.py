@@ -1,5 +1,3 @@
-[file name]: app.py
-[file content begin]
 from transformers import pipeline
 from google import genai
 from google.genai import types
@@ -1140,4 +1138,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-[file content end]
