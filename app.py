@@ -14,6 +14,11 @@ from bs4 import BeautifulSoup
 import re
 from ddgs import DDGS
 
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+import re
+
 # Load environment variables from Streamlit secrets
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -121,36 +126,297 @@ def find_industry_competitors(industry_keywords, max_competitors=8):
         st.error(f"Error finding competitors: {str(e)}")
         return []
 
-def extract_industry_keywords(website_analysis, patent_claims):
-    """Extract industry keywords from website analysis and patent claims"""
-    # Combine both sources for better industry detection
+# NEW: Robust Tiered Industry Detection
+def keyword_industry_detection(patent_claims, website_analysis):
+    """Tier 1: Fast keyword-based industry detection"""
     combined_text = f"{website_analysis} {patent_claims}".lower()
     
-    # Common industry terms to look for
-    industry_terms = [
-        'software', 'technology', 'healthcare', 'medical', 'finance', 'financial', 
-        'ecommerce', 'retail', 'manufacturing', 'automotive', 'education', 
-        'energy', 'renewable', 'biotech', 'pharmaceutical', 'telecom', 
-        'entertainment', 'gaming', 'logistics', 'transportation', 'real estate',
-        'agriculture', 'food tech', 'insurtech', 'fintech', 'edtech', 'healthtech'
-    ]
+    # Enhanced industry taxonomy with weights
+    industry_taxonomy = {
+        'fintech': ['financial', 'banking', 'payment', 'fintech', 'investment', 'lending', 'insurance', 'wealth', 'portfolio', 'transaction', 'digital wallet', 'cryptocurrency'],
+        'healthtech': ['healthcare', 'medical', 'patient', 'clinical', 'telemedicine', 'biotech', 'pharmaceutical', 'diagnostic', 'health tech', 'medical device', 'hospital', 'treatment'],
+        'edtech': ['education', 'learning', 'course', 'student', 'educational', 'online learning', 'edtech', 'curriculum', 'teaching', 'academic', 'school', 'university'],
+        'saas': ['software', 'service', 'cloud', 'subscription', 'enterprise', 'platform', 'api', 'integration', 'dashboard', 'workflow', 'automation', 'business intelligence'],
+        'iot': ['internet of things', 'iot', 'connected', 'sensor', 'smart device', 'embedded', 'wireless', 'smart home', 'industrial iot', 'sensor network'],
+        'ai_ml': ['artificial intelligence', 'machine learning', 'neural network', 'deep learning', 'ai model', 'algorithm', 'predictive', 'natural language', 'computer vision', 'llm'],
+        'ecommerce': ['ecommerce', 'e-commerce', 'online store', 'shopping cart', 'marketplace', 'retail', 'inventory', 'checkout', 'product catalog', 'digital storefront'],
+        'cleantech': ['renewable', 'solar', 'wind', 'energy', 'sustainability', 'green tech', 'carbon', 'environmental', 'clean energy', 'climate', 'emissions']
+    }
     
-    found_industries = []
-    for term in industry_terms:
-        if term in combined_text:
-            found_industries.append(term)
+    industry_scores = {}
+    for industry, keywords in industry_taxonomy.items():
+        score = 0
+        for keyword in keywords:
+            if keyword in combined_text:
+                # Weight longer, more specific keywords higher
+                score += len(keyword.split()) * 2
+        if score > 0:
+            industry_scores[industry] = score
     
-    # If no specific industries found, use broader terms from the analysis
-    if not found_industries:
-        # Extract potential industry from website analysis
-        if "technology" in combined_text:
-            found_industries.append("technology")
-        if "software" in combined_text:
-            found_industries.append("software")
-        if "platform" in combined_text:
-            found_industries.append("technology platform")
+    return dict(sorted(industry_scores.items(), key=lambda x: x[1], reverse=True)[:5])
+
+def llm_industry_classifier(patent_claims, website_content):
+    """Tier 2: LLM-based industry classification for precision"""
+    prompt = f"""
+    Analyze this patent context and website content to determine the primary industry.
     
-    return found_industries[:3]  # Return top 3 industry keywords
+    PATENT CONTEXT:
+    {patent_claims[:1000]}  # Limit length
+    
+    WEBSITE CONTENT: 
+    {website_content[:1000]}  # Limit length
+    
+    Classify into ONE primary industry from this list:
+    - fintech (financial technology, banking, payments)
+    - healthtech (healthcare, medical technology)
+    - edtech (education technology)
+    - saas (software as a service, enterprise software)
+    - iot (internet of things, connected devices)
+    - ai_ml (artificial intelligence, machine learning)
+    - ecommerce (online retail, marketplaces)
+    - cleantech (renewable energy, sustainability)
+    - other (if none of the above fit well)
+    
+    Respond in this exact JSON format:
+    {{
+        "primary_industry": "industry_name",
+        "confidence": "High/Medium/Low",
+        "reasoning": "brief explanation",
+        "alternative_industries": ["industry1", "industry2"]
+    }}
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=prompt
+        )
+        
+        # Parse JSON response
+        import json
+        result = json.loads(response.text)
+        return result
+        
+    except Exception as e:
+        # Fallback to keyword analysis if LLM fails
+        return {
+            "primary_industry": "other",
+            "confidence": "Low", 
+            "reasoning": f"LLM analysis failed: {str(e)}",
+            "alternative_industries": []
+        }
+
+def semantic_similarity_analysis(patent_claims, website_analysis):
+    """Tier 3: Semantic similarity analysis using embeddings"""
+    try:
+        # Generate embedding for the combined context
+        combined_text = f"{patent_claims} {website_analysis}"[:2000]  # Limit length
+        
+        # Get embedding from Gemini
+        response = client.models.embed_content(
+            model="models/embedding-001",
+            contents=combined_text
+        )
+        
+        patent_embedding = response.embeddings[0].values
+        
+        # Industry domain descriptions with embeddings
+        industry_domains = {
+            "fintech": "financial technology digital payments banking investment cryptocurrency blockchain fintech insurance wealth management",
+            "healthtech": "healthcare medical technology patient care telemedicine biotech pharmaceuticals medical devices diagnostics treatment clinical",
+            "edtech": "education learning educational technology online courses digital learning students teachers academic curriculum school university",
+            "saas": "software as a service cloud computing enterprise business platform subscription api integration workflow automation",
+            "iot": "internet of things connected devices sensors smart home industrial iot wireless embedded systems sensor networks",
+            "ai_ml": "artificial intelligence machine learning neural networks deep learning algorithms predictive analytics natural language processing computer vision",
+            "ecommerce": "ecommerce online shopping retail marketplace digital storefront inventory management checkout payment gateway",
+            "cleantech": "renewable energy sustainability green technology environmental solar wind power carbon emissions clean energy climate"
+        }
+        
+        # Calculate similarities
+        similarities = {}
+        vectorizer = TfidfVectorizer()
+        
+        # Create document corpus
+        documents = [combined_text] + list(industry_domains.values())
+        tfidf_matrix = vectorizer.fit_transform(documents)
+        
+        # Calculate cosine similarities between patent text and each industry
+        patent_vector = tfidf_matrix[0]
+        for i, (industry, description) in enumerate(industry_domains.items(), 1):
+            industry_vector = tfidf_matrix[i]
+            similarity = cosine_similarity(patidf_vector, industry_vector)[0][0]
+            similarities[industry] = similarity
+        
+        return dict(sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:5])
+        
+    except Exception as e:
+        st.warning(f"Semantic analysis failed: {str(e)}")
+        return {}
+
+def consolidate_industries(keyword_results, llm_results, semantic_results):
+    """Consolidate results from all three tiers with weighted scoring"""
+    
+    consolidated = {}
+    
+    # Weight the different methods
+    weights = {
+        'llm': 0.5,      # Most reliable
+        'semantic': 0.3,  # Good for nuance
+        'keyword': 0.2    # Baseline
+    }
+    
+    # Process LLM results (highest weight)
+    if llm_results.get('primary_industry') and llm_results.get('primary_industry') != 'other':
+        industry = llm_results['primary_industry']
+        confidence_weight = {'High': 1.0, 'Medium': 0.7, 'Low': 0.4}.get(llm_results.get('confidence', 'Medium'), 0.5)
+        consolidated[industry] = weights['llm'] * confidence_weight
+    
+    # Add LLM alternative industries with lower weight
+    for alt_industry in llm_results.get('alternative_industries', [])[:2]:
+        if alt_industry in consolidated:
+            consolidated[alt_industry] += weights['llm'] * 0.3
+        else:
+            consolidated[alt_industry] = weights['llm'] * 0.3
+    
+    # Process semantic results
+    for industry, score in semantic_results.items():
+        if industry in consolidated:
+            consolidated[industry] += weights['semantic'] * score
+        else:
+            consolidated[industry] = weights['semantic'] * score
+    
+    # Process keyword results
+    max_keyword_score = max(keyword_results.values()) if keyword_results else 1
+    for industry, score in keyword_results.items():
+        normalized_score = score / max_keyword_score if max_keyword_score > 0 else 0
+        if industry in consolidated:
+            consolidated[industry] += weights['keyword'] * normalized_score
+        else:
+            consolidated[industry] = weights['keyword'] * normalized_score
+    
+    # Filter and return top industries
+    final_industries = dict(sorted(consolidated.items(), key=lambda x: x[1], reverse=True)[:3])
+    
+    # Convert to percentage confidence
+    total = sum(final_industries.values()) if final_industries else 1
+    return {industry: round(score/total * 100, 1) for industry, score in final_industries.items()}
+
+def robust_industry_detection(patent_claims, website_analysis, original_url):
+    """Main tiered industry detection function"""
+    
+    st.info("🔍 Analyzing industry context...")
+    
+    # Tier 1: Fast keyword analysis
+    with st.spinner("Tier 1: Keyword analysis..."):
+        keyword_industries = keyword_industry_detection(patent_claims, website_analysis)
+    
+    # Tier 2: LLM classification
+    with st.spinner("Tier 2: AI classification..."):
+        llm_industries = llm_industry_classifier(patent_claims, website_analysis)
+    
+    # Tier 3: Semantic similarity
+    with st.spinner("Tier 3: Semantic analysis..."):
+        semantic_industries = semantic_similarity_analysis(patent_claims, website_analysis)
+    
+    # Consolidate results
+    final_industries = consolidate_industries(keyword_industries, llm_industries, semantic_industries)
+    
+    # Display analysis results in expander
+    with st.expander("📊 Industry Analysis Details", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("**🔤 Keyword Analysis**")
+            for industry, score in keyword_industries.items():
+                st.write(f"- {industry}: {score}")
+        
+        with col2:
+            st.markdown("**🤖 LLM Classification**")
+            st.write(f"Primary: {llm_industries.get('primary_industry', 'N/A')}")
+            st.write(f"Confidence: {llm_industries.get('confidence', 'N/A')}")
+            st.write(f"Alternatives: {', '.join(llm_industries.get('alternative_industries', []))}")
+        
+        with col3:
+            st.markdown("**🎯 Semantic Similarity**")
+            for industry, score in semantic_industries.items():
+                st.write(f"- {industry}: {score:.3f}")
+    
+    return final_industries
+
+# ENHANCED: Updated industry_wide_infringement_scan to use tiered detection
+def industry_wide_infringement_scan(patent_claims, website_analysis, original_url, max_competitors=5):
+    """Search across multiple industry players for infringement risks - ENHANCED"""
+    
+    # Use robust industry detection
+    detected_industries = robust_industry_detection(patent_claims, website_analysis, original_url)
+    
+    if not detected_industries:
+        st.error("❌ Could not detect relevant industries for scanning")
+        return {
+            "error": "Industry detection failed",
+            "scanned_competitors": 0,
+            "high_risk_findings": 0,
+            "detailed_results": []
+        }
+    
+    # Show detected industries
+    st.success(f"🎯 Detected Industries: {', '.join(detected_industries.keys())}")
+    
+    # Use the highest confidence industry for competitor search
+    primary_industry = next(iter(detected_industries))
+    industry_confidence = detected_industries[primary_industry]
+    
+    st.info(f"🔍 Scanning {primary_industry} industry (confidence: {industry_confidence}%)...")
+    
+    # Find competitors in this industry
+    competitors = find_industry_competitors(primary_industry, max_competitors)
+    
+    if not competitors:
+        return {
+            "error": f"No competitors found in {primary_industry} industry",
+            "scanned_competitors": 0,
+            "high_risk_findings": 0,
+            "detailed_results": []
+        }
+    
+    infringement_findings = []
+    high_risk_count = 0
+    
+    # Analyze each competitor
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, competitor in enumerate(competitors):
+        status_text.text(f"Analyzing {competitor['name']}... ({i+1}/{len(competitors)})")
+        
+        risk_analysis = infringement_risk_analysis(patent_claims, competitor["url"])
+        infringement_findings.append({
+            "competitor_info": competitor,
+            "risk_analysis": risk_analysis
+        })
+        
+        if risk_analysis.get("risk_level") == "High":
+            high_risk_count += 1
+        
+        progress_bar.progress((i + 1) / len(competitors))
+    
+    status_text.text("Analysis complete!")
+    
+    return {
+        "scanned_competitors": len(competitors),
+        "high_risk_findings": high_risk_count,
+        "detected_industries": detected_industries,
+        "primary_industry": primary_industry,
+        "detailed_results": infringement_findings,
+        "overall_risk_level": "High" if high_risk_count > 0 else "Medium" if len(competitors) > 0 else "Low"
+    }
+
+# UPDATED: extract_industry_keywords now uses the tiered approach
+def extract_industry_keywords(website_analysis, patent_claims):
+    """Enhanced industry keyword extraction using tiered approach"""
+    # This function is now a wrapper for the robust detection
+    industries = robust_industry_detection(patent_claims, website_analysis, "")
+    return list(industries.keys())
 
 def infringement_risk_analysis(patent_claims, competitor_url):
     """Analyze a specific competitor website for infringement risks"""
