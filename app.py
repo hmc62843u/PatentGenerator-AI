@@ -1101,7 +1101,13 @@ def main():
         st.caption("Transform Any Website into Patent Opportunities • AI-Powered Competitive Intelligence • Prior Art Research • Infringement Risk Analysis")
     with col2:
         st.markdown("""
-        <div style='text-align: right; padding: 10px; background: #f0f2f6; border-radius: 5px;'>
+        <div style='
+            text-align: right; 
+            padding: 10px; 
+            background: rgba(128, 128, 128, 0.1); 
+            border-radius: 5px; 
+            border: 1px solid rgba(128, 128, 128, 0.2);
+        '>
             <strong>W&Patent</strong><br>
             <small>The World's Smarter Patent Marketplace</small>
         </div>
