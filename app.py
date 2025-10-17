@@ -1,6 +1,5 @@
 from transformers import pipeline
-from google import genai
-from google.genai import types
+import groq
 import wave
 import os
 import streamlit as st
@@ -13,21 +12,50 @@ import urllib.parse
 from bs4 import BeautifulSoup
 import re
 from ddgs import DDGS
-
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
-import re
 
 # Load environment variables from Streamlit secrets
 try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except (KeyError, FileNotFoundError):
-    st.error("❌ GEMINI_API_KEY not found in Streamlit secrets. Please configure it in the Secrets tab.")
+    st.error("❌ GROQ_API_KEY not found in Streamlit secrets. Please configure it in the Secrets tab.")
     st.stop()
 
-# Configure Gemini
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Configure Groq client
+client = groq.Client(api_key=GROQ_API_KEY)
+
+# Groq model configuration
+GROQ_MODEL = "meta-llama/llama-guard-4-12b"  # Options: "llama-3.1-8b-instant", "llama-3.1-70b-versatile", "mixtral-8x7b-32768"
+
+def groq_generate_content(prompt, model=GROQ_MODEL):
+    """Generate content using Groq API"""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=4000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"Groq API error: {str(e)}")
+        return f"Error generating content: {str(e)}"
+
+def groq_embed_content(text):
+    """Generate embeddings using Groq - Note: Groq doesn't have native embedding API yet"""
+    # For now, we'll use TF-IDF as a fallback for semantic similarity
+    # In production, you might want to use a separate embedding service
+    vectorizer = TfidfVectorizer(max_features=1000)
+    try:
+        # Create a simple embedding using TF-IDF
+        tfidf_matrix = vectorizer.fit_transform([text])
+        return tfidf_matrix.toarray()[0]
+    except:
+        return np.zeros(1000)  # Return zero vector as fallback
 
 # Rate limiting functions
 def init_usage_tracking():
@@ -103,30 +131,7 @@ def increment_usage(patent_title=""):
     
     return data["usage_count"], data["total_patents_generated"]
 
-# NEW: Infringement Analysis Functions
-def find_industry_competitors(industry_keywords, max_competitors=8):
-    """Find competitor websites in the same industry"""
-    try:
-        with DDGS() as ddgs:
-            competitors = []
-            query = f"top companies in {industry_keywords} industry website"
-            search_results = list(ddgs.text(query, max_results=max_competitors))
-            
-            for result in search_results:
-                url = result.get("href", "")
-                if url and any(domain in url for domain in ['.com', '.org', '.io', '.net']):
-                    competitors.append({
-                        "name": result.get("title", "Unknown Company"),
-                        "url": url,
-                        "description": result.get("body", "")[:200] + "..."
-                    })
-            
-            return competitors
-    except Exception as e:
-        st.error(f"Error finding competitors: {str(e)}")
-        return []
-
-# NEW: Robust Tiered Industry Detection
+# Robust Tiered Industry Detection (Updated for Groq)
 def keyword_industry_detection(patent_claims, website_analysis):
     """Tier 1: Fast keyword-based industry detection"""
     combined_text = f"{website_analysis} {patent_claims}".lower()
@@ -156,7 +161,7 @@ def keyword_industry_detection(patent_claims, website_analysis):
     return dict(sorted(industry_scores.items(), key=lambda x: x[1], reverse=True)[:5])
 
 def llm_industry_classifier(patent_claims, website_content):
-    """Tier 2: LLM-based industry classification for precision"""
+    """Tier 2: LLM-based industry classification for precision using Groq"""
     prompt = f"""
     Analyze this patent context and website content to determine the primary industry.
     
@@ -187,18 +192,20 @@ def llm_industry_classifier(patent_claims, website_content):
     """
     
     try:
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt
-        )
+        response = groq_generate_content(prompt)
         
         # Parse JSON response
         import json
-        result = json.loads(response.text)
+        # Extract JSON from response if there's additional text
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+        else:
+            result = json.loads(response)
         return result
         
     except Exception as e:
-        # Fallback to keyword analysis if LLM fails
+        # Fallback to keyword analysis if Groq fails
         return {
             "primary_industry": "other",
             "confidence": "Low", 
@@ -207,20 +214,11 @@ def llm_industry_classifier(patent_claims, website_content):
         }
 
 def semantic_similarity_analysis(patent_claims, website_analysis):
-    """Tier 3: Semantic similarity analysis using embeddings"""
+    """Tier 3: Semantic similarity analysis using TF-IDF"""
     try:
-        # Generate embedding for the combined context
         combined_text = f"{patent_claims} {website_analysis}"[:2000]  # Limit length
         
-        # Get embedding from Gemini
-        response = client.models.embed_content(
-            model="models/embedding-001",
-            contents=combined_text
-        )
-        
-        patent_embedding = response.embeddings[0].values
-        
-        # Industry domain descriptions with embeddings
+        # Industry domain descriptions
         industry_domains = {
             "fintech": "financial technology digital payments banking investment cryptocurrency blockchain fintech insurance wealth management",
             "healthtech": "healthcare medical technology patient care telemedicine biotech pharmaceuticals medical devices diagnostics treatment clinical",
@@ -232,7 +230,7 @@ def semantic_similarity_analysis(patent_claims, website_analysis):
             "cleantech": "renewable energy sustainability green technology environmental solar wind power carbon emissions clean energy climate"
         }
         
-        # Calculate similarities
+        # Calculate similarities using TF-IDF
         similarities = {}
         vectorizer = TfidfVectorizer()
         
@@ -244,7 +242,7 @@ def semantic_similarity_analysis(patent_claims, website_analysis):
         patent_vector = tfidf_matrix[0]
         for i, (industry, description) in enumerate(industry_domains.items(), 1):
             industry_vector = tfidf_matrix[i]
-            similarity = cosine_similarity(patidf_vector, industry_vector)[0][0]
+            similarity = cosine_similarity(patent_vector, industry_vector)[0][0]
             similarities[industry] = similarity
         
         return dict(sorted(similarities.items(), key=lambda x: x[1], reverse=True)[:5])
@@ -343,9 +341,107 @@ def robust_industry_detection(patent_claims, website_analysis, original_url):
     
     return final_industries
 
-# ENHANCED: Updated industry_wide_infringement_scan to use tiered detection
+# Infringement Analysis Functions
+def find_industry_competitors(industry_keywords, max_competitors=8):
+    """Find competitor websites in the same industry"""
+    try:
+        with DDGS() as ddgs:
+            competitors = []
+            query = f"top companies in {industry_keywords} industry website"
+            search_results = list(ddgs.text(query, max_results=max_competitors))
+            
+            for result in search_results:
+                url = result.get("href", "")
+                if url and any(domain in url for domain in ['.com', '.org', '.io', '.net']):
+                    competitors.append({
+                        "name": result.get("title", "Unknown Company"),
+                        "url": url,
+                        "description": result.get("body", "")[:200] + "..."
+                    })
+            
+            return competitors
+    except Exception as e:
+        st.error(f"Error finding competitors: {str(e)}")
+        return []
+
+def infringement_risk_analysis(patent_claims, competitor_url):
+    """Analyze a specific competitor website for infringement risks using Groq"""
+    try:
+        # Scrape the competitor site
+        site_content = scrape_website_content(competitor_url)
+        
+        if site_content.startswith("Error"):
+            return {
+                "competitor_url": competitor_url,
+                "risk_level": "Unknown",
+                "error": site_content,
+                "overlapping_features": [],
+                "recommendations": []
+            }
+        
+        # Analyze for infringement risks using Groq
+        analysis_prompt = f"""
+        PATENT CLAIMS TO ANALYZE:
+        {patent_claims}
+        
+        COMPETITOR WEBSITE CONTENT:
+        {site_content}
+        
+        Analyze for potential patent infringement risks. Focus on:
+        
+        1. **DIRECT PRODUCT MATCH**: Does the website show products/services that directly implement the claimed invention?
+        2. **FEATURE OVERLAP**: Which specific claim elements appear to be implemented in their products?
+        3. **TECHNICAL SIMILARITY**: How similar are the technical approaches and implementations?
+        4. **COMMERCIAL USE EVIDENCE**: Is there evidence of actual commercial use of similar technology?
+        
+        Provide your analysis in this exact JSON format:
+        {{
+            "risk_level": "Low/Medium/High",
+            "overlapping_features": ["list of specific overlapping features"],
+            "infringement_confidence": "Low/Medium/High",
+            "key_findings": "Detailed analysis of potential infringement",
+            "recommendations": ["list of recommendations for further action"]
+        }}
+        
+        Be thorough and evidence-based in your assessment.
+        """
+        
+        response = groq_generate_content(analysis_prompt)
+        
+        # Parse the JSON response
+        try:
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                analysis_result = json.loads(json_match.group())
+            else:
+                analysis_result = json.loads(response)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a structured response from text
+            analysis_result = {
+                "risk_level": "Medium",
+                "overlapping_features": ["Unable to parse detailed features"],
+                "infringement_confidence": "Medium", 
+                "key_findings": response[:500] + "...",
+                "recommendations": ["Conduct manual review of this competitor"]
+            }
+        
+        # Add competitor info to result
+        analysis_result["competitor_url"] = competitor_url
+        analysis_result["scraped_content_preview"] = site_content[:300] + "..."
+        
+        return analysis_result
+        
+    except Exception as e:
+        return {
+            "competitor_url": competitor_url,
+            "risk_level": "Error",
+            "error": str(e),
+            "overlapping_features": [],
+            "recommendations": ["Analysis failed - manual review required"]
+        }
+
 def industry_wide_infringement_scan(patent_claims, website_analysis, original_url, max_competitors=5):
-    """Search across multiple industry players for infringement risks - ENHANCED"""
+    """Search across multiple industry players for infringement risks"""
     
     # Use robust industry detection
     detected_industries = robust_industry_detection(patent_claims, website_analysis, original_url)
@@ -407,135 +503,6 @@ def industry_wide_infringement_scan(patent_claims, website_analysis, original_ur
         "high_risk_findings": high_risk_count,
         "detected_industries": detected_industries,
         "primary_industry": primary_industry,
-        "detailed_results": infringement_findings,
-        "overall_risk_level": "High" if high_risk_count > 0 else "Medium" if len(competitors) > 0 else "Low"
-    }
-
-# UPDATED: extract_industry_keywords now uses the tiered approach
-def extract_industry_keywords(website_analysis, patent_claims):
-    """Enhanced industry keyword extraction using tiered approach"""
-    # This function is now a wrapper for the robust detection
-    industries = robust_industry_detection(patent_claims, website_analysis, "")
-    return list(industries.keys())
-
-def infringement_risk_analysis(patent_claims, competitor_url):
-    """Analyze a specific competitor website for infringement risks"""
-    try:
-        # Scrape the competitor site
-        site_content = scrape_website_content(competitor_url)
-        
-        if site_content.startswith("Error"):
-            return {
-                "competitor_url": competitor_url,
-                "risk_level": "Unknown",
-                "error": site_content,
-                "overlapping_features": [],
-                "recommendations": []
-            }
-        
-        # Analyze for infringement risks using Gemini
-        analysis_prompt = f"""
-        PATENT CLAIMS TO ANALYZE:
-        {patent_claims}
-        
-        COMPETITOR WEBSITE CONTENT:
-        {site_content}
-        
-        Analyze for potential patent infringement risks. Focus on:
-        
-        1. **DIRECT PRODUCT MATCH**: Does the website show products/services that directly implement the claimed invention?
-        2. **FEATURE OVERLAP**: Which specific claim elements appear to be implemented in their products?
-        3. **TECHNICAL SIMILARITY**: How similar are the technical approaches and implementations?
-        4. **COMMERCIAL USE EVIDENCE**: Is there evidence of actual commercial use of similar technology?
-        
-        Provide your analysis in this exact JSON format:
-        {{
-            "risk_level": "Low/Medium/High",
-            "overlapping_features": ["list of specific overlapping features"],
-            "infringement_confidence": "Low/Medium/High",
-            "key_findings": "Detailed analysis of potential infringement",
-            "recommendations": ["list of recommendations for further action"]
-        }}
-        
-        Be thorough and evidence-based in your assessment.
-        """
-        
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=analysis_prompt
-        )
-        
-        # Parse the JSON response
-        try:
-            analysis_result = json.loads(response.text)
-        except json.JSONDecodeError:
-            # If JSON parsing fails, create a structured response from text
-            analysis_result = {
-                "risk_level": "Medium",
-                "overlapping_features": ["Unable to parse detailed features"],
-                "infringement_confidence": "Medium", 
-                "key_findings": response.text[:500] + "...",
-                "recommendations": ["Conduct manual review of this competitor"]
-            }
-        
-        # Add competitor info to result
-        analysis_result["competitor_url"] = competitor_url
-        analysis_result["scraped_content_preview"] = site_content[:300] + "..."
-        
-        return analysis_result
-        
-    except Exception as e:
-        return {
-            "competitor_url": competitor_url,
-            "risk_level": "Error",
-            "error": str(e),
-            "overlapping_features": [],
-            "recommendations": ["Analysis failed - manual review required"]
-        }
-
-def industry_wide_infringement_scan(patent_claims, industry_keywords, max_competitors=5):
-    """Search across multiple industry players for infringement risks"""
-    st.info(f"🔍 Scanning industry: {', '.join(industry_keywords)}")
-    
-    # Find competitors in this industry
-    competitors = find_industry_competitors(industry_keywords[0] if industry_keywords else "technology", 
-                                          max_competitors)
-    
-    if not competitors:
-        return {
-            "error": "No competitors found for analysis",
-            "scanned_competitors": 0,
-            "high_risk_findings": 0,
-            "detailed_results": []
-        }
-    
-    infringement_findings = []
-    high_risk_count = 0
-    
-    # Analyze each competitor
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    for i, competitor in enumerate(competitors):
-        status_text.text(f"Analyzing {competitor['name']}... ({i+1}/{len(competitors)})")
-        
-        risk_analysis = infringement_risk_analysis(patent_claims, competitor["url"])
-        infringement_findings.append({
-            "competitor_info": competitor,
-            "risk_analysis": risk_analysis
-        })
-        
-        if risk_analysis.get("risk_level") == "High":
-            high_risk_count += 1
-        
-        progress_bar.progress((i + 1) / len(competitors))
-    
-    status_text.text("Analysis complete!")
-    
-    return {
-        "scanned_competitors": len(competitors),
-        "high_risk_findings": high_risk_count,
-        "industry_keywords": industry_keywords,
         "detailed_results": infringement_findings,
         "overall_risk_level": "High" if high_risk_count > 0 else "Medium" if len(competitors) > 0 else "Low"
     }
@@ -606,7 +573,7 @@ def display_infringement_results(infringement_results, patent_claims):
             "scanned_competitors": infringement_results['scanned_competitors'],
             "high_risk_findings": infringement_results['high_risk_findings'],
             "overall_risk_level": infringement_results['overall_risk_level'],
-            "industry_keywords": infringement_results.get('industry_keywords', [])
+            "industry_keywords": infringement_results.get('detected_industries', {})
         },
         "detailed_results": infringement_results['detailed_results'],
         "generated_at": datetime.now().isoformat()
@@ -672,8 +639,8 @@ def extract_search_terms_from_claims(patent_claims):
     
     return list(set(technical_terms))  # Remove duplicates
 
-def analyze_prior_art_with_gemini(patent_claims, prior_art_results):
-    """Use Gemini to analyze prior art search results WITH SOURCE CITATIONS"""
+def analyze_prior_art_with_groq(patent_claims, prior_art_results):
+    """Use Groq to analyze prior art search results WITH SOURCE CITATIONS"""
     if not prior_art_results.get('results'):
         return "No prior art results to analyze."
     
@@ -724,11 +691,7 @@ def analyze_prior_art_with_gemini(patent_claims, prior_art_results):
     """
     
     try:
-        response = client.models.generate_content(
-            model="gemini-flash-latest",
-            contents=prompt
-        )
-        return response.text
+        return groq_generate_content(prompt)
     except Exception as e:
         return f"Error analyzing prior art: {str(e)}"
 
@@ -831,8 +794,8 @@ def scrape_website_content(url):
     except Exception as e:
         return f"Error scraping website: {str(e)}"
 
-def analyze_website_with_gemini(url, content):
-    """Use Gemini to analyze the website and extract key information for patent generation"""
+def analyze_website_with_groq(url, content):
+    """Use Groq to analyze the website and extract key information for patent generation"""
     prompt = f"""
     Analyze this website content and extract key information for generating a patent concept:
     
@@ -850,15 +813,10 @@ def analyze_website_with_gemini(url, content):
     Be concise but comprehensive. Focus on identifying patentable opportunities.
     """
     
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt
-    )
-    
-    return response.text
+    return groq_generate_content(prompt)
 
 def generate_patent_from_analysis(website_analysis, url):
-    """Generate a patent concept based on website analysis"""
+    """Generate a patent concept based on website analysis using Groq"""
     prompt = f"""
     Based on this website analysis, create a compelling patent concept:
     
@@ -877,15 +835,10 @@ def generate_patent_from_analysis(website_analysis, url):
     Focus on solving the core problems identified in the website analysis.
     """
     
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt
-    )
-    
-    return response.text
+    return groq_generate_content(prompt)
 
 def analyze_patent_strength(patent_description):
-    """Analyze the strength and novelty of the generated patent"""
+    """Analyze the strength and novelty of the generated patent using Groq"""
     prompt = f"""
     As a patent analyst, evaluate this patent concept:
     
@@ -902,15 +855,10 @@ def analyze_patent_strength(patent_description):
     Format your response clearly with headings.
     """
     
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt
-    )
-    
-    return response.text
+    return groq_generate_content(prompt)
 
 def generate_patent_claims(patent_description):
-    """Generate formal patent claims"""
+    """Generate formal patent claims using Groq"""
     prompt = f"""
     Based on this patent description, draft 3-5 formal patent claims:
     
@@ -924,12 +872,7 @@ def generate_patent_claims(patent_description):
     Use proper patent claim language and structure.
     """
     
-    response = client.models.generate_content(
-        model="gemini-flash-latest",
-        contents=prompt
-    )
-    
-    return response.text
+    return groq_generate_content(prompt)
 
 # Form submission handler
 def submit_inquiry_form(form_data):
@@ -1137,6 +1080,13 @@ def main():
         else:
             st.success("✅ Within Limit")
         
+        # Groq model info
+        st.markdown("---")
+        st.markdown("### 🤖 AI Model")
+        st.markdown(f"**Using:** {GROQ_MODEL}")
+        st.markdown("**Provider:** Groq")
+        st.markdown("**Speed:** ⚡ Ultra-fast")
+        
         # W&Patent promotion
         render_wpatent_promotion()
         
@@ -1215,9 +1165,9 @@ def main():
                 with st.expander("📄 View Scraped Website Content"):
                     st.text_area("Extracted Content", website_content, height=200)
             
-            # Step 2: Analyze website with Gemini
+            # Step 2: Analyze website with Groq
             with st.spinner("🤖 Analyzing website content and identifying opportunities..."):
-                website_analysis = analyze_website_with_gemini(website_url, website_content)
+                website_analysis = analyze_website_with_groq(website_url, website_content)
                 
                 with st.expander("📊 View Website Analysis"):
                     st.markdown(website_analysis)
@@ -1243,19 +1193,17 @@ def main():
                     prior_art_results = search_prior_art(patent_claims, max_results=5)
                     
                     if not prior_art_results.get('error'):
-                        prior_art_analysis = analyze_prior_art_with_gemini(patent_claims, prior_art_results)
+                        prior_art_analysis = analyze_prior_art_with_groq(patent_claims, prior_art_results)
             
             # NEW: Step 7 - Infringement Risk Analysis (if enabled)
             infringement_results = None
             
             if include_infringement_analysis:
                 with st.spinner("⚖️ Analyzing infringement risks across industry competitors..."):
-                    # Extract industry keywords for competitor search
-                    industry_keywords = extract_industry_keywords(website_analysis, patent_claims)
-                    
                     infringement_results = industry_wide_infringement_scan(
                         patent_claims, 
-                        industry_keywords,
+                        website_analysis,
+                        website_url,
                         max_competitors=5
                     )
             
